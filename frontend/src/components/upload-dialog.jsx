@@ -42,7 +42,7 @@ export default function UploadDialog({ onUpload }) {
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4 mt-2">
           <div className="space-y-1.5">
-            <Label htmlFor="book-url">URL <span className="text-muted-foreground text-xs">(PDF, DOCX, MOBI, Google Drive)</span></Label>
+            <Label htmlFor="book-url">URL <span className="text-muted-foreground text-xs">(PDF, DOCX, MOBI, MD, Google Drive)</span></Label>
             <Input id="book-url" placeholder="https://..." value={url} onChange={(e) => setUrl(e.target.value)} required />
           </div>
           <div className="space-y-1.5">

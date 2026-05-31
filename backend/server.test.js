@@ -163,4 +163,13 @@ describe('POST /api/books/upload-url', () => {
     // Should fail (missing url → axios will throw)
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
+
+  it('returns error for unreachable MD URL (auth guard passes)', async () => {
+    const res = await request(app)
+      .post('/api/books/upload-url')
+      .set('Authorization', authHeader)
+      .send({ url: 'http://localhost:9999/nonexistent.md', title: 'Test MD' });
+    // Auth passes, but download will fail → 400
+    expect(res.status).toBe(400);
+  });
 });

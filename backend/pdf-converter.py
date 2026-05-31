@@ -28,6 +28,7 @@ Output JSON shape:
 import sys
 import json
 import base64
+import shutil
 import fitz          # PyMuPDF
 import pdfplumber
 from collections import Counter
@@ -185,6 +186,50 @@ def in_table_region(y: float, table_bboxes: list) -> bool:
     return any(tb[1] - TOLERANCE <= y <= tb[3] + TOLERANCE for tb in table_bboxes)
 
 
+# ── OCR fallback (image-only PDFs) ──────────────────────────────────────────
+
+def _tesseract_available() -> bool:
+    return shutil.which("tesseract") is not None
+
+
+def _ocr_extract(doc_fitz) -> tuple[list, int]:
+    """Run Tesseract OCR on every page via PyMuPDF. Returns (pages_result, total_text_len)."""
+    pages_result = []
+    total_text_len = 0
+
+    for page_idx in range(len(doc_fitz)):
+        page = doc_fitz[page_idx]
+        elements = []
+
+        try:
+            # Try with Vietnamese first, fall back to English-only if lang pack missing
+            try:
+                tp = page.get_textpage_ocr(language="eng+vie", dpi=150, full=True)
+            except Exception:
+                tp = page.get_textpage_ocr(language="eng", dpi=150, full=True)
+
+            for block in tp.extractDICT().get("blocks", []):
+                if block.get("type") != 0:
+                    continue
+                parts = [
+                    escape_html(span.get("text", "").strip())
+                    for line in block.get("lines", [])
+                    for span in line.get("spans", [])
+                    if span.get("text", "").strip()
+                ]
+                if parts:
+                    content = " ".join(parts)
+                    total_text_len += len(content)
+                    elements.append({"type": "html", "y": block["bbox"][1], "content": f"<p>{content}</p>"})
+        except Exception:
+            pass
+
+        elements.sort(key=lambda e: e["y"])
+        pages_result.append({"pageNum": page_idx + 1, "elements": elements})
+
+    return pages_result, total_text_len
+
+
 # ── Main extraction ──────────────────────────────────────────────────────────
 
 def extract_pdf(pdf_path: str) -> dict:
@@ -261,6 +306,19 @@ def extract_pdf(pdf_path: str) -> dict:
     denom = total_text_len + estimated_img_chars
     text_ratio = (total_text_len / denom) if denom > 0 else 0
     is_supported = total_text_len >= 50 and text_ratio > 0.2
+
+    # OCR failover: entire file has no extractable text → try Tesseract before rejecting
+    if not is_supported and total_text_len == 0 and _tesseract_available():
+        ocr_pages, ocr_text_len = _ocr_extract(doc_fitz)
+        if ocr_text_len >= 50:
+            return {
+                "isSupported": True,
+                "textRatio": 100,
+                "imageCount": 0,
+                "pageCount": len(doc_fitz),
+                "pages": ocr_pages,
+                "ocr": True,
+            }
 
     return {
         "isSupported": is_supported,

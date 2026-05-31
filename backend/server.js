@@ -141,13 +141,19 @@ async function callPdfConverter(buffer) {
 
       const timer = setTimeout(() => {
         python.kill();
-        reject(new Error('PDF conversion timed out after 60s'));
-      }, 60000);
+        reject(new Error('PDF conversion timed out after 120s'));
+      }, 120000);
 
       python.on('close', (code) => {
         clearTimeout(timer);
         if (code !== 0) {
-          reject(new Error(`PDF converter failed: ${stderr}`));
+          // pdf-converter.py prints errors as JSON to stdout; stderr may be empty
+          try {
+            const parsed = JSON.parse(stdout);
+            reject(new Error(`PDF converter failed: ${parsed.error || stderr || 'unknown error'}`));
+          } catch {
+            reject(new Error(`PDF converter failed: ${stderr || stdout || 'unknown error'}`));
+          }
           return;
         }
         try {
@@ -258,7 +264,13 @@ async function callMarkitdownConverter(buffer, fileType) {
       python.on('close', (code) => {
         clearTimeout(timer);
         if (code !== 0) {
-          reject(new Error(`markitdown converter failed: ${stderr}`));
+          // markitdown-converter.py prints errors as JSON to stdout; stderr may be empty
+          try {
+            const parsed = JSON.parse(stdout);
+            reject(new Error(`markitdown converter failed: ${parsed.error || stderr || 'unknown error'}`));
+          } catch {
+            reject(new Error(`markitdown converter failed: ${stderr || stdout || 'unknown error'}`));
+          }
           return;
         }
         try {
@@ -293,6 +305,21 @@ async function convertDOCX(buffer) {
 }
 
 /**
+ * Convert Markdown file — content is already markdown, just decode and estimate page count.
+ */
+async function convertMD(buffer) {
+  const markdownContent = buffer.toString('utf8');
+  // Estimate pages: ~2000 chars per page, minimum 1
+  const pageCount = Math.max(1, Math.ceil(markdownContent.length / 2000));
+  return {
+    markdownContent,
+    pageCount,
+    analysis: { textRatio: 100, isSupported: true, classification: 'text-heavy' },
+    imageCount: 0,
+  };
+}
+
+/**
  * Convert MOBI to Markdown using markitdown.
  */
 async function convertMOBI(buffer) {
@@ -323,6 +350,9 @@ async function convertFile(buffer, fileType) {
   } else if (fileType === 'mobi') {
     const result = await convertMOBI(buffer);
     return { ...result, contentType: 'markdown' };
+  } else if (fileType === 'md') {
+    const result = await convertMD(buffer);
+    return { ...result, contentType: 'markdown' };
   } else {
     throw new Error(`Unsupported file type: ${fileType}`);
   }
@@ -344,6 +374,7 @@ app.post('/api/books/upload-url', verifyToken, async (req, res) => {
 
     if (fileExt === '.docx' || fileExt === '.doc') fileType = 'docx';
     if (fileExt === '.mobi') fileType = 'mobi';
+    if (fileExt === '.md' || fileExt === '.markdown') fileType = 'md';
 
     // Handle Google links
     let downloadUrl = url;
@@ -379,6 +410,29 @@ app.post('/api/books/upload-url', verifyToken, async (req, res) => {
     }
 
     const buffer = Buffer.from(response.data);
+
+    // Refine fileType from Content-Disposition when URL had no recognizable extension
+    // (e.g. Google Drive share links like drive.google.com/file/d/ID/view)
+    if (fileType === 'pdf' && !buffer.slice(0, 5).equals(Buffer.from('%PDF-'))) {
+      const disposition = response.headers['content-disposition'] || '';
+      const contentType = response.headers['content-type'] || '';
+      const nameMatch = disposition.match(/filename\*?=['"]?(?:UTF-8'')?([^;\n"']+)/i);
+      const headerExt = nameMatch ? path.extname(nameMatch[1].trim()).toLowerCase() : '';
+
+      if (headerExt === '.md' || headerExt === '.markdown'
+          || contentType.startsWith('text/markdown') || contentType.startsWith('text/x-markdown')) {
+        fileType = 'md';
+      } else if (headerExt === '.docx' || contentType.includes('wordprocessingml')) {
+        fileType = 'docx';
+      } else if (headerExt === '.mobi') {
+        fileType = 'mobi';
+      } else {
+        const hint = contentType.includes('text/html')
+          ? 'The URL returned an HTML page instead of a PDF (likely a login or preview page).'
+          : 'The URL did not return a valid PDF file.';
+        return res.status(400).json({ error: `${hint} Use a direct download link.` });
+      }
+    }
 
     // Convert file (PDF → HTML, DOCX/MOBI → Markdown)
     const conversion = await convertFile(buffer, fileType);
