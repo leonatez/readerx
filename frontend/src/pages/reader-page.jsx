@@ -20,6 +20,8 @@ export default function ReaderPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  // Tracks how many viewport-heights the content has been shifted up (no-scroll pagination)
+  const [viewportOffset, setViewportOffset] = useState(0);
   const [fontSize, setFontSize] = useState(() =>
     parseInt(localStorage.getItem('readerx-font-size') || '16', 10)
   );
@@ -28,6 +30,8 @@ export default function ReaderPage() {
   );
   const saveTimer = useRef(null);
   const touchOrigin = useRef(null);
+  const mainRef = useRef(null);    // viewport reference: clientHeight = available reading height
+  const contentRef = useRef(null); // content reference: scrollHeight = total content height
 
   useEffect(() => { localStorage.setItem('readerx-font-size', fontSize); }, [fontSize]);
   useEffect(() => { localStorage.setItem('readerx-line-height', lineHeight); }, [lineHeight]);
@@ -39,10 +43,9 @@ export default function ReaderPage() {
         setBook(data);
         const type = data.contentType || 'html';
         setContentType(type);
-        const pageList =
-          type === 'markdown'
-            ? splitMarkdown(data.content || '')
-            : splitHtml(data.content || '');
+        const pageList = type === 'markdown'
+          ? splitMarkdown(data.content || '')
+          : splitHtml(data.content || '');
         setPages(pageList);
         const lastPage = data.lastReadPage || 0;
         setCurrentPage(Math.min(lastPage, pageList.length - 1));
@@ -65,26 +68,38 @@ export default function ReaderPage() {
   const goToPage = (page) => {
     const clamped = Math.max(0, Math.min(page, pages.length - 1));
     setCurrentPage(clamped);
+    setViewportOffset(0);
     saveProgress(clamped);
-    window.scrollTo(0, 0);
   };
 
-  // Record where the finger landed so we can distinguish tap from scroll/drag
   const handleTouchStart = (e) => {
     const t = e.touches[0];
     if (t) touchOrigin.current = { x: t.clientX, y: t.clientY };
   };
 
-  // Navigate only when the finger barely moved (tap, not a scroll drag)
   const handleTap = (e) => {
-    if (pages.length <= 1 || !touchOrigin.current) return;
+    if (!touchOrigin.current) return;
     const touch = e.changedTouches[0];
     if (!touch) return;
     const dx = Math.abs(touch.clientX - touchOrigin.current.x);
     const dy = Math.abs(touch.clientY - touchOrigin.current.y);
     touchOrigin.current = null;
-    if (dx > 10 || dy > 10) return; // finger dragged — let the scroll happen naturally
-    goToPage(touch.clientX < window.innerWidth / 2 ? currentPage - 1 : currentPage + 1);
+    if (dx > 10 || dy > 10) return; // drag/scroll — ignore
+
+    const viewportH = mainRef.current?.clientHeight ?? 0;
+    const contentH = contentRef.current?.scrollHeight ?? 0;
+    // Max number of viewport-height steps needed to reach the bottom of the content
+    const maxOffset = contentH > viewportH ? Math.ceil((contentH - viewportH) / viewportH) : 0;
+
+    if (touch.clientX >= window.innerWidth / 2) {
+      // Right half: advance viewport chunk, then advance book page
+      if (viewportOffset < maxOffset) setViewportOffset(v => v + 1);
+      else goToPage(currentPage + 1);
+    } else {
+      // Left half: retreat viewport chunk, then retreat book page
+      if (viewportOffset > 0) setViewportOffset(v => v - 1);
+      else goToPage(currentPage - 1);
+    }
   };
 
   if (loading)
@@ -102,13 +117,16 @@ export default function ReaderPage() {
       </div>
     );
 
-  const progress =
-    pages.length > 1 ? Math.round(((currentPage + 1) / pages.length) * 100) : 100;
+  const progress = pages.length > 1 ? Math.round(((currentPage + 1) / pages.length) * 100) : 100;
+  // Cap translateY so the last partial chunk never shows empty space below the content
+  const viewportH = mainRef.current?.clientHeight ?? 0;
+  const contentH = contentRef.current?.scrollHeight ?? 0;
+  const translateY = Math.min(viewportOffset * viewportH, Math.max(0, contentH - viewportH));
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Top bar */}
-      <header className="border-b sticky top-0 bg-background/95 backdrop-blur z-10">
+      <header className="border-b bg-background/95 backdrop-blur z-10 shrink-0">
         <div className="max-w-3xl mx-auto px-4 h-12 flex items-center gap-3">
           <Button variant="ghost" size="icon" className="shrink-0" onClick={() => navigate('/library')}>
             <ArrowLeft className="h-4 w-4" />
@@ -120,9 +138,7 @@ export default function ReaderPage() {
             {currentPage + 1} / {pages.length}
           </span>
           <Button
-            variant="ghost"
-            size="icon"
-            className="shrink-0"
+            variant="ghost" size="icon" className="shrink-0"
             onClick={() => setShowSettings((s) => !s)}
             aria-label="Reading settings"
           >
@@ -131,10 +147,8 @@ export default function ReaderPage() {
         </div>
         {showSettings && (
           <ReaderSettings
-            fontSize={fontSize}
-            lineHeight={lineHeight}
-            onFontSizeChange={setFontSize}
-            onLineHeightChange={setLineHeight}
+            fontSize={fontSize} lineHeight={lineHeight}
+            onFontSizeChange={setFontSize} onLineHeightChange={setLineHeight}
           />
         )}
         <div className="h-0.5 bg-muted">
@@ -142,27 +156,35 @@ export default function ReaderPage() {
         </div>
       </header>
 
-      {/* Content — onTouchEnd drives tap-to-navigate on mobile */}
-      <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-8" onTouchStart={handleTouchStart} onTouchEnd={handleTap}>
-        {contentType === 'markdown' ? (
-          <div
-            className="prose prose-sm sm:prose max-w-none"
-            style={{ fontSize: `${fontSize}px`, lineHeight }}
-          >
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{pages[currentPage] || ''}</ReactMarkdown>
-          </div>
-        ) : (
-          <div
-            className="prose prose-sm sm:prose max-w-none"
-            style={{ fontSize: `${fontSize}px`, lineHeight }}
-            dangerouslySetInnerHTML={{ __html: pages[currentPage] || '' }}
-          />
-        )}
+      {/* Content — overflow-hidden + translateY implements no-scroll viewport pagination */}
+      <main
+        ref={mainRef}
+        className="flex-1 min-h-0 max-w-3xl mx-auto w-full overflow-hidden"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTap}
+      >
+        <div
+          ref={contentRef}
+          className="px-4 py-8"
+          style={{ transform: `translateY(-${translateY}px)`, transition: 'transform 0.3s ease' }}
+        >
+          {contentType === 'markdown' ? (
+            <div className="prose prose-sm sm:prose max-w-none" style={{ fontSize: `${fontSize}px`, lineHeight }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{pages[currentPage] || ''}</ReactMarkdown>
+            </div>
+          ) : (
+            <div
+              className="prose prose-sm sm:prose max-w-none"
+              style={{ fontSize: `${fontSize}px`, lineHeight }}
+              dangerouslySetInnerHTML={{ __html: pages[currentPage] || '' }}
+            />
+          )}
+        </div>
       </main>
 
-      {/* Navigation */}
+      {/* Navigation footer — hidden on mobile where tap-to-navigate replaces buttons */}
       {pages.length > 1 && (
-        <footer className="border-t sticky bottom-0 bg-background/95 backdrop-blur">
+        <footer className="hidden md:block border-t bg-background/95 backdrop-blur shrink-0">
           <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
             <Button
               variant="outline" size="sm" disabled={currentPage === 0}
