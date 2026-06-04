@@ -27,6 +27,7 @@ export default function ReaderPage() {
     parseFloat(localStorage.getItem('readerx-line-height') || '1.8')
   );
   const saveTimer = useRef(null);
+  const touchOrigin = useRef(null);
 
   useEffect(() => { localStorage.setItem('readerx-font-size', fontSize); }, [fontSize]);
   useEffect(() => { localStorage.setItem('readerx-line-height', lineHeight); }, [lineHeight]);
@@ -68,11 +69,21 @@ export default function ReaderPage() {
     window.scrollTo(0, 0);
   };
 
-  // Tap left half → previous page, tap right half → next page (touch devices only)
+  // Record where the finger landed so we can distinguish tap from scroll/drag
+  const handleTouchStart = (e) => {
+    const t = e.touches[0];
+    if (t) touchOrigin.current = { x: t.clientX, y: t.clientY };
+  };
+
+  // Navigate only when the finger barely moved (tap, not a scroll drag)
   const handleTap = (e) => {
-    if (pages.length <= 1) return;
+    if (pages.length <= 1 || !touchOrigin.current) return;
     const touch = e.changedTouches[0];
     if (!touch) return;
+    const dx = Math.abs(touch.clientX - touchOrigin.current.x);
+    const dy = Math.abs(touch.clientY - touchOrigin.current.y);
+    touchOrigin.current = null;
+    if (dx > 10 || dy > 10) return; // finger dragged — let the scroll happen naturally
     goToPage(touch.clientX < window.innerWidth / 2 ? currentPage - 1 : currentPage + 1);
   };
 
@@ -132,7 +143,7 @@ export default function ReaderPage() {
       </header>
 
       {/* Content — onTouchEnd drives tap-to-navigate on mobile */}
-      <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-8" onTouchEnd={handleTap}>
+      <main className="flex-1 max-w-3xl mx-auto w-full px-4 py-8" onTouchStart={handleTouchStart} onTouchEnd={handleTap}>
         {contentType === 'markdown' ? (
           <div
             className="prose prose-sm sm:prose max-w-none"
